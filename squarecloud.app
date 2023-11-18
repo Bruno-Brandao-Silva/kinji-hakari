@@ -3,4 +3,4 @@ MAIN=bot.ts
 MEMORY=128
 VERSION=recommended
 
-START=npm start
+START=npm run bs
