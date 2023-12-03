@@ -1,17 +1,17 @@
-import { Client, GatewayIntentBits } from 'discord.js';
+import { Client, GatewayIntentBits, ApplicationCommandOptionType } from 'discord.js';
 import dotenv from 'dotenv';
-import commands from './commands';
-import type { Server } from './types';
+import CommandCenter from './CommandCenter';
+import { Definer } from './CommandsDefiner';
 
 dotenv.config();
 
-const { TOKEN, CLIENT_ID, PREFIX } = process.env;
-if (!TOKEN || !CLIENT_ID || !PREFIX) {
+const { TOKEN, CLIENT_ID } = process.env;
+
+if (!TOKEN || !CLIENT_ID) {
 	throw new Error('Variáveis de ambiente não definidas.');
 }
 
-
-const servers: { [guildId: string]: Server } = {};
+Definer({ TOKEN, CLIENT_ID });
 
 const client = new Client({
 	intents: [
@@ -22,17 +22,24 @@ const client = new Client({
 	]
 });
 
+const musicPlayer = new CommandCenter(client);
+
 client.once('ready', () => {
 	console.log(`Bot está logado como ${client.user?.tag}`);
 });
 
-client.on('messageCreate', async (message) => {
-	if (!message.content.startsWith(PREFIX)) return;
-	const command = message.content.split(PREFIX)[1]
-	if (commands[command] && typeof commands[command] === "function") {
-		commands[command](client, message, servers);
-	} else {
-		console.log(`A função ${command} não existe.`);
+client.on('interactionCreate', async interaction => {
+	if (!interaction.isCommand()) return;
+
+	const { commandName } = interaction;
+
+	if (musicPlayer.commands[commandName]) {
+		try {
+			musicPlayer.commands[commandName](interaction);
+		} catch (error) {
+			console.error(error);
+			await interaction.reply('Ocorreu um erro ao processar o comando.');
+		}
 	}
 });
 
