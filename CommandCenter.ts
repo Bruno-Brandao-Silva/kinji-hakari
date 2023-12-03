@@ -18,10 +18,12 @@ class CommandCenter {
         this.servers = {};
     }
 
-    private async leaveHandler(interaction: CommandInteraction,): Promise<void> {
+    private async leaveHandler(interaction: CommandInteraction): Promise<void> {
         if (!interaction.guildId) {
-            throw new Error('Você precisa estar em um servidor para poder usar esse comando!');
+            await interaction.reply('Você precisa estar em um servidor para poder usar esse comando!');
+            return;
         }
+
         const guildId = interaction.guildId;
         const server = this.servers[guildId];
 
@@ -34,30 +36,37 @@ class CommandCenter {
                 playerSubscription: null,
             };
             delete this.servers[guildId];
-            await interaction.reply('Kinji Hakari liberou seu domínio.');
+            if (!interaction.replied)
+                await interaction.reply('Kinji Hakari liberou seu domínio.');
         } else {
-            throw new Error('Eu não estou em nenhum canal de voz!');
+            await interaction.reply('Eu não estou em nenhum canal de voz!');
+            return;
         }
     }
 
     private async playerHandler(interaction: CommandInteraction): Promise<void> {
         try {
             if (!interaction.guildId) {
-                throw new Error('Você precisa estar em um servidor para poder usar esse comando!');
+                await interaction.reply('Você precisa estar em um servidor para poder usar esse comando!');
+                return;
             }
             if (!interaction.member) {
-                throw new Error('Você precisa ser membro de um servidor para poder usar esse comando!');
+                await interaction.reply('Você precisa ser membro de um servidor para poder usar esse comando!');
+                return;
             }
             let opt = interaction.options.get('quantas-vezes')?.value! as number;
+
             if (opt <= 0) {
-                throw new Error('Você precisa escolher um número maior que 0!');
+                await interaction.reply('Você precisa escolher um número maior que 0!');
+                return;
             }
             const guild = this.client.guilds.cache.get(interaction.guildId)!
             const member = guild.members.cache.get(interaction.member.user.id)!;
             const voiceChannel = member.voice.channel!;
 
             if (!voiceChannel.id) {
-                throw new Error('Você precisa estar em um canal de voz para poder usar esse comando!');
+                await interaction.reply('Você precisa estar em um canal de voz para poder usar esse comando!');
+                return;
             }
 
             const connection = getVoiceConnection(guild.id) || joinVoiceChannel({
@@ -82,11 +91,16 @@ class CommandCenter {
             const subscription = connection.subscribe(audioPlayer);
 
             subscription!.player.on(AudioPlayerStatus.Idle, () => {
-                if (!opt || (opt && opt > 0)) {
-                    opt--;
+                if (opt === undefined) {
                     setTimeout(() => audioPlayer.play(createAudioResource('./tuca-donka.mp3')), 100);
-                } else {
-                    setTimeout(() => this.leaveHandler(interaction), 5000);
+                }
+                else {
+                    opt--;
+                    if (opt > 0) {
+                        setTimeout(() => audioPlayer.play(createAudioResource('./tuca-donka.mp3')), 100);
+                    } else {
+                        setTimeout(() => this.leaveHandler(interaction), 5000);
+                    }
                 }
             });
 
@@ -116,7 +130,6 @@ class CommandCenter {
             }, 1000);
         } catch (error: any) {
             console.error(error);
-            await interaction.reply(error.message);
         }
     }
 
