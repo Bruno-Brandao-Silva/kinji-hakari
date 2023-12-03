@@ -1,5 +1,5 @@
 DISPLAY_NAME=Kinji Hakari 
-MAIN=bot.ts
+MAIN=Bot.ts
 MEMORY=128
 VERSION=recommended
 
