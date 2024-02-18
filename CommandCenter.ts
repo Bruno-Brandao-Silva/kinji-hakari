@@ -9,7 +9,7 @@ import {
 
 import type { Server } from './types';
 
-class CommandCenter {   
+class CommandCenter {
     private client: Client;
     private servers: Record<Snowflake, Server>;
 
@@ -92,12 +92,14 @@ class CommandCenter {
 
             subscription!.player.on(AudioPlayerStatus.Idle, () => {
                 if (opt === undefined) {
-                    setTimeout(() => audioPlayer.play(createAudioResource('./tuca-donka.mp3')), 100);
+                    const resource = createAudioResource('./tuca-donka.mp3');
+                    setTimeout(() => audioPlayer.play(resource), 100);
                 }
                 else {
                     opt--;
                     if (opt > 0) {
-                        setTimeout(() => audioPlayer.play(createAudioResource('./tuca-donka.mp3')), 100);
+                        const resource = createAudioResource('./tuca-donka.mp3');
+                        setTimeout(() => audioPlayer.play(resource), 100);
                     } else {
                         setTimeout(() => this.leaveHandler(interaction), 5000);
                     }
