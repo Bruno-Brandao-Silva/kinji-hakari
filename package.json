@@ -14,10 +14,10 @@
   "license": "ISC",
   "dependencies": {
     "@discordjs/voice": "^0.16.1",
-    "@types/node": "^20.10.3",
-    "discord-player": "^6.6.6",
+    "@types/node": "^20.11.16",
+    "discord-player": "^6.6.7",
     "discord.js": "^14.14.1",
-    "dotenv": "^16.3.1",
-    "typescript": "^5.3.2"
+    "dotenv": "^16.4.1",
+    "typescript": "^5.3.3"
   }
 }

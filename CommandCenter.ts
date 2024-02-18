@@ -9,7 +9,7 @@ import {
 
 import type { Server } from './types';
 
-class CommandCenter {
+class CommandCenter {   
     private client: Client;
     private servers: Record<Snowflake, Server>;
 

@@ -26,6 +26,9 @@ const musicPlayer = new CommandCenter(client);
 
 client.once('ready', () => {
 	console.log(`Bot está logado como ${client.user?.tag}`);
+	client.user?.setAvatar('./hakari-dance-hakari.gif')
+        .then(user => console.log(`Changed profile picture for ${user.tag}`))
+        .catch(console.error);
 });
 
 client.on('interactionCreate', async interaction => {
