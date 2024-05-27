@@ -84,21 +84,23 @@ class CommandCenter {
             await interaction.reply({ embeds: [embed] });
 
             const audioPlayer = createAudioPlayer();
-            const resource = createAudioResource('./tuca-donka.mp3');
-
+            const resource = createAudioResource('./tuca-donka.mp3', { inlineVolume: true });
+            resource.volume?.setVolume(0.35);
             audioPlayer.play(resource);
 
             const subscription = connection.subscribe(audioPlayer);
 
             subscription!.player.on(AudioPlayerStatus.Idle, () => {
                 if (opt === undefined) {
-                    const resource = createAudioResource('./tuca-donka.mp3');
+                    const resource = createAudioResource('./tuca-donka.mp3', { inlineVolume: true });
+                    resource.volume?.setVolume(0.35);
                     setTimeout(() => audioPlayer.play(resource), 100);
                 }
                 else {
                     opt--;
                     if (opt > 0) {
-                        const resource = createAudioResource('./tuca-donka.mp3');
+                        const resource = createAudioResource('./tuca-donka.mp3', { inlineVolume: true });
+                        resource.volume?.setVolume(0.35);
                         setTimeout(() => audioPlayer.play(resource), 100);
                     } else {
                         setTimeout(() => this.leaveHandler(interaction), 5000);

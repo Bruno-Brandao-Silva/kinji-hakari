@@ -11,7 +11,7 @@ if (!TOKEN || !CLIENT_ID) {
 	throw new Error('Variáveis de ambiente não definidas.');
 }
 
-Definer({ TOKEN, CLIENT_ID });
+// Definer({ TOKEN, CLIENT_ID });
 
 const client = new Client({
 	intents: [
@@ -26,9 +26,9 @@ const musicPlayer = new CommandCenter(client);
 
 client.once('ready', () => {
 	console.log(`Bot está logado como ${client.user?.tag}`);
-	client.user?.setAvatar('./hakari-dance-hakari.gif')
-        .then(user => console.log(`Changed profile picture for ${user.tag}`))
-        .catch(console.error);
+	// client.user?.setAvatar('./hakari-dance-hakari.gif')
+    //     .then(user => console.log(`Changed profile picture for ${user.tag}`))
+    //     .catch(console.error);
 });
 
 client.on('interactionCreate', async interaction => {
