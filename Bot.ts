@@ -16,9 +16,7 @@ Definer({ TOKEN, CLIENT_ID });
 const client = new Client({
 	intents: [
 		GatewayIntentBits.Guilds,
-		GatewayIntentBits.GuildMessages,
 		GatewayIntentBits.GuildVoiceStates,
-		GatewayIntentBits.MessageContent,
 	]
 });
 
