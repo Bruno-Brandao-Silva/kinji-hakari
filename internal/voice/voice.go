@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -51,6 +52,7 @@ func (m *Manager) Join(s *discordgo.Session, guildID, channelID string) (*Sessio
 	if sess, ok := m.sessions[guildID]; ok {
 		m.mu.RUnlock() // Libera lock antes de qualquer operação no Discord
 		if sess.ChannelID != channelID {
+			slog.Info("Mudando de canal", "guild_id", guildID, "old_channel", sess.ChannelID, "new_channel", channelID)
 			// ChangeChannel é rápido, mas idealmente não deve bloquear o manager
 			sess.Connection.ChangeChannel(channelID, false, false)
 			// Atualizamos o channelID na struct (precisa de Lock de Escrita rápido)
@@ -63,6 +65,7 @@ func (m *Manager) Join(s *discordgo.Session, guildID, channelID string) (*Sessio
 	m.mu.RUnlock()
 
 	// 2. Conecta ao canal de voz (OPERAÇÃO LENTA E BLOQUEANTE)
+	slog.Info("Conectando ao canal de voz...", "guild_id", guildID, "channel_id", channelID)
 	// IMPORTANTE: Fazemos isso FORA de qualquer Lock do manager para evitar Deadlock
 	// com os Event Handlers que precisam ler o manager.
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
@@ -101,6 +104,7 @@ func (m *Manager) Leave(guildID string) {
 		// para garantir consistência de estado imediata.
 		sess.Connection.Disconnect()
 		delete(m.sessions, guildID)
+		slog.Info("Sessão de voz encerrada", "guild_id", guildID)
 	}
 }
 
@@ -113,6 +117,7 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 	sess.Cancel = cancel
 
 	go func() {
+		log := slog.With("guild_id", sess.GuildID)
 		defer func() {
 			// Só desconecta se NÃO foi cancelado (cancelado significa que outra música começou ou comando stop foi dado mas queremos controlar o leave manualmente)
 			// Na verdade, se foi cancelado por "substituição", não queremos sair.
@@ -121,9 +126,11 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 			if ctx.Err() == context.Canceled {
 				// Contexto cancelado explicitamente (provavelmente nova música tocando).
 				// Não saímos do canal.
+				log.Info("Playback cancelado (substituição)")
 				return
 			}
 			
+			log.Info("Playback finalizado, saindo do canal em 1s...")
 			time.Sleep(1 * time.Second)
 			GlobalManager.Leave(sess.GuildID)
 		}()
@@ -140,7 +147,7 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 			case <-ctx.Done():
 				return
 			case <-timeout:
-				fmt.Println("Timeout aguardando Voice Connection Ready")
+				log.Warn("Timeout aguardando Voice Connection Ready", "ready", sess.Connection.Ready)
 				return
 			case <-ticker.C:
 				if sess.Connection.Ready {
@@ -160,7 +167,7 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 		// 3. Envia frames de silêncio para "aquecer" a conexão UDP e o SSRC
 		// Isso é CRÍTICO para evitar "broken pipe" ou desconexão imediata em gateways novos.
 		if err := sendSilence(sess.Connection); err != nil {
-			fmt.Printf("Erro enviando silêncio: %v\n", err)
+			log.Warn("Erro enviando silêncio", "error", err)
 		}
 
 		loopCount := 0
@@ -176,7 +183,7 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 				}
 
 				if err := playAudioFile(ctx, sess.Connection, filePath); err != nil {
-					fmt.Printf("Erro tocando áudio: %v\n", err)
+					log.Error("Erro tocando áudio", "error", err, "loop", loopCount)
 					// Se ocorrer erro de conexão (ex: broken pipe), encerra
 					return
 				}

@@ -1,66 +1,74 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"hakari-bot/internal/bot"
+	"hakari-bot/internal/logger"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
 )
 
 func main() {
-	// 1. Carrega variaveis de ambiente
+	// 1. Inicializa Logger
+	logger.Init()
+
+	// 2. Carrega variaveis de ambiente
 	if err := godotenv.Load(); err != nil {
-		log.Println("Aviso: Arquivo .env não encontrado, usando vars do sistema.")
+		slog.Warn("Arquivo .env não encontrado, usando vars do sistema.")
 	}
 
 	token := os.Getenv("TOKEN")
 	if token == "" {
-		log.Fatal("TOKEN não definido.")
+		slog.Error("TOKEN não definido.")
+		os.Exit(1)
 	}
 
-	// 2. Cria sessão do Discord
+	// 3. Cria sessão do Discord
 	s, err := discordgo.New("Bot " + token)
 	if err != nil {
-		log.Fatalf("Erro ao criar sessão: %v", err)
+		slog.Error("Erro ao criar sessão", "error", err)
+		os.Exit(1)
 	}
 
-	// 3. Define Intents (ATUALIZAÇÃO CRÍTICA DO DISCORD)
+	// 4. Define Intents (ATUALIZAÇÃO CRÍTICA DO DISCORD)
 	// GuildVoiceStates é necessário para saber quem está nos canais
 	s.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates | discordgo.IntentsGuildMessages
 
-	// 4. Injeta handlers
+	// 5. Injeta handlers
 	b := bot.NewBot()
 	s.AddHandler(b.InteractionHandler)
 	s.AddHandler(b.VoiceStateUpdateHandler)
 
-	// 5. Abre conexão
+	// 6. Abre conexão
 	if err := s.Open(); err != nil {
-		log.Fatalf("Erro ao abrir conexão via socket: %v", err)
+		slog.Error("Erro ao abrir conexão via socket", "error", err)
+		os.Exit(1)
 	}
 	defer s.Close()
 
-	// 6. Registra Slash Commands
-	log.Println("Registrando comandos...")
+	// 7. Registra Slash Commands
+	slog.Info("Registrando comandos...")
 	commands := bot.GetCommands()
 	for _, cmd := range commands {
 		if _, err := s.ApplicationCommandCreate(s.State.User.ID, "", cmd); err != nil {
-			log.Fatalf("Erro ao registrar comando %s: %v", cmd.Name, err)
+			slog.Error("Erro ao registrar comando", "command", cmd.Name, "error", err)
+			os.Exit(1)
 		}
 	}
 
-	log.Printf("Bot logado como %s. Pressione CTRL+C para sair.", s.State.User.Username)
+	slog.Info("Bot logado", "user", s.State.User.Username)
 
-	// 7. Graceful Shutdown
+	// 8. Graceful Shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
-	log.Println("Removendo comandos e desligando...")
+	slog.Info("Removendo comandos e desligando...")
 	// Opcional: Limpar comandos ao sair para não duplicar em dev
 	// for _, cmd := range cmds {
 	// 	s.ApplicationCommandDelete(s.State.User.ID, "", cmd.ID)

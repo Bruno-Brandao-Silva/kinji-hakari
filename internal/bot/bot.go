@@ -2,7 +2,7 @@ package bot
 
 import (
 	"hakari-bot/internal/voice"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -43,16 +43,25 @@ func (b *Bot) InteractionHandler(s *discordgo.Session, i *discordgo.InteractionC
 	}
 
 	data := i.ApplicationCommandData()
+	
+	// Logger contextual para a requisição
+	log := slog.With(
+		"command", data.Name,
+		"user_id", i.Member.User.ID,
+		"guild_id", i.GuildID,
+	)
+	
+	log.Info("Comando recebido")
 
 	switch data.Name {
 	case "jackpot":
-		b.handleJackpot(s, i, data)
+		b.handleJackpot(s, i, data, log)
 	case "leave":
-		b.handleLeave(s, i)
+		b.handleLeave(s, i, log)
 	}
 }
 
-func (b *Bot) handleJackpot(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
+func (b *Bot) handleJackpot(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData, log *slog.Logger) {
 	// Validações iniciais
 	guildID := i.GuildID
 	if guildID == "" {
@@ -106,24 +115,26 @@ func (b *Bot) handleJackpot(s *discordgo.Session, i *discordgo.InteractionCreate
 		},
 	})
 	if err != nil {
-		log.Println("Erro ao responder interação:", err)
+		log.Error("Erro ao responder interação", "error", err)
 		return
 	}
 
 	// Lógica de Voz
 	sess, err := voice.GlobalManager.Join(s, guildID, userChannelID)
 	if err != nil {
-		log.Println("Erro ao conectar voz:", err)
+		log.Error("Erro ao conectar voz", "error", err)
 		return
 	}
 
 	// Inicia Playback
 	// Certifique-se que o arquivo tuca-donka.mp3 está na raiz
+	log.Info("Iniciando playback", "loops", loops, "file", "./tuca-donka.mp3")
 	sess.PlayLoop("./tuca-donka.mp3", loops)
 }
 
-func (b *Bot) handleLeave(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (b *Bot) handleLeave(s *discordgo.Session, i *discordgo.InteractionCreate, log *slog.Logger) {
 	voice.GlobalManager.Leave(i.GuildID)
+	log.Info("Desconectou do canal de voz")
 
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -139,6 +150,7 @@ func (b *Bot) VoiceStateUpdateHandler(s *discordgo.Session, v *discordgo.VoiceSt
 	if v.UserID == s.State.User.ID {
 		if v.ChannelID == "" {
 			// Bot desconectou
+			slog.Info("Bot desconectado do canal de voz", "guild_id", v.GuildID)
 			voice.GlobalManager.Leave(v.GuildID)
 		}
 		return
@@ -162,6 +174,7 @@ func (b *Bot) VoiceStateUpdateHandler(s *discordgo.Session, v *discordgo.VoiceSt
 
 		// Se userCount for 1, é só o bot
 		if userCount == 1 {
+			slog.Info("Bot sozinho no canal, agendando saída...", "guild_id", v.GuildID)
 			// Aguarda 5 segundos antes de sair (Debounce simples)
 			time.AfterFunc(5*time.Second, func() {
 				// Verifica novamente se ainda está sozinho
@@ -179,6 +192,7 @@ func (b *Bot) VoiceStateUpdateHandler(s *discordgo.Session, v *discordgo.VoiceSt
 				}
 
 				if count == 1 {
+					slog.Info("Bot ainda sozinho, saindo.", "guild_id", v.GuildID)
 					voice.GlobalManager.Leave(v.GuildID)
 				}
 			})
