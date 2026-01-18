@@ -164,9 +164,23 @@ func (b *Bot) VoiceStateUpdateHandler(s *discordgo.Session, v *discordgo.VoiceSt
 		if userCount == 1 {
 			// Aguarda 5 segundos antes de sair (Debounce simples)
 			time.AfterFunc(5*time.Second, func() {
-				// Verifica novamente
-				// (Implementação robusta requereria checar novamente o estado)
-				voice.GlobalManager.Leave(v.GuildID)
+				// Verifica novamente se ainda está sozinho
+				// Precisamos de uma nova referência ao guild atualizada
+				g, err := s.State.Guild(v.GuildID)
+				if err != nil {
+					return
+				}
+
+				count := 0
+				for _, vs := range g.VoiceStates {
+					if vs.ChannelID == sess.ChannelID {
+						count++
+					}
+				}
+
+				if count == 1 {
+					voice.GlobalManager.Leave(v.GuildID)
+				}
 			})
 		}
 	}

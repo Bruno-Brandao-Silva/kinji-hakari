@@ -114,6 +114,16 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 
 	go func() {
 		defer func() {
+			// Só desconecta se NÃO foi cancelado (cancelado significa que outra música começou ou comando stop foi dado mas queremos controlar o leave manualmente)
+			// Na verdade, se foi cancelado por "substituição", não queremos sair.
+			// Se foi cancelado por "leave", o manager já tratou.
+			// Vamos verificar se o erro do contexto é Canceled.
+			if ctx.Err() == context.Canceled {
+				// Contexto cancelado explicitamente (provavelmente nova música tocando).
+				// Não saímos do canal.
+				return
+			}
+			
 			time.Sleep(1 * time.Second)
 			GlobalManager.Leave(sess.GuildID)
 		}()
