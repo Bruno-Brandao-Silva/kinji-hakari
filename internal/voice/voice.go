@@ -151,7 +151,11 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 
 		// 2. Define falando como TRUE
 		sess.Connection.Speaking(true)
-		defer sess.Connection.Speaking(false)
+		defer func() {
+			if sess.Connection.Ready {
+				sess.Connection.Speaking(false)
+			}
+		}()
 
 		// 3. Envia frames de silêncio para "aquecer" a conexão UDP e o SSRC
 		// Isso é CRÍTICO para evitar "broken pipe" ou desconexão imediata em gateways novos.
