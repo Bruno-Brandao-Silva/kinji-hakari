@@ -159,7 +159,7 @@ func (b *Bot) VoiceStateUpdateHandler(s *discordgo.Session, v *discordgo.VoiceSt
 	// Lógica para sair se estiver sozinho
 	// (Requer consulta à lista de membros do canal, simplificada aqui)
 	sess := voice.GlobalManager.GetSession(v.GuildID)
-	if sess != nil && sess.ChannelID == v.BeforeUpdate.ChannelID {
+	if sess != nil && v.BeforeUpdate != nil && sess.ChannelID == v.BeforeUpdate.ChannelID {
 		guild, err := s.State.Guild(v.GuildID)
 		if err != nil {
 			return
