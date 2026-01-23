@@ -227,6 +227,7 @@ func playAudioFile(ctx context.Context, vc *discordgo.VoiceConnection, filepath 
 	}
 	defer run.Wait()
 
+	// Buffer para leitura do ffmpeg (16KB)
 	ffmpegbuf := bufio.NewReaderSize(ffmpegOut, 16384)
 	encoder, err := gopus.NewEncoder(frameRate, channels, gopus.Audio)
 	if err != nil {
@@ -237,11 +238,40 @@ func playAudioFile(ctx context.Context, vc *discordgo.VoiceConnection, filepath 
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 
+	// Controle de retry de conexão
+	lostConnectionFrames := 0
+	maxLostFrames := 500 // ~10 segundos (500 * 20ms)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			// 1. Verifica estado da conexão
+			if !vc.Ready || vc.OpusSend == nil {
+				lostConnectionFrames++
+				if lostConnectionFrames > maxLostFrames {
+					return fmt.Errorf("timeout aguardando reconexão de voz (>10s)")
+				}
+				if lostConnectionFrames%50 == 1 { // Log a cada 1s aprox
+					slog.Warn("Conexão de voz instável, aguardando...", "lost_frames", lostConnectionFrames)
+				}
+				// Pula este ciclo (não lê do ffmpeg para tentar preservar buffer, 
+				// ou lê e descarta se quisermos manter "tempo real". 
+				// Para música, pausar a leitura é melhor para retomar de onde parou.)
+				continue
+			}
+
+			// Se recuperou de uma falha
+			if lostConnectionFrames > 0 {
+				slog.Info("Conexão de voz recuperada!", "waited_frames", lostConnectionFrames)
+				lostConnectionFrames = 0
+				// Envia silêncio para "limpar" o pipe udp? Talvez não seja necessário,
+				// mas garante que o sequence number reinicie ok se necessário.
+				// Por segurança, apenas seguimos.
+			}
+
+			// 2. Lê do FFMPEG
 			err := binary.Read(ffmpegbuf, binary.LittleEndian, &pcmBuf)
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				return nil
@@ -250,16 +280,15 @@ func playAudioFile(ctx context.Context, vc *discordgo.VoiceConnection, filepath 
 				return err
 			}
 
+			// 3. Encode Opus
 			opusData, err := encoder.Encode(pcmBuf, frameSize, maxBytes)
 			if err != nil {
 				continue
 			}
 
-			if !vc.Ready || vc.OpusSend == nil {
-				// Tenta esperar um pouco ou falha
-				return fmt.Errorf("conexão não pronta")
-			}
-
+			// 4. Envia
+			// Devido ao check acima, aqui deve estar seguro, mas panic em channel fechado é fatal.
+			// OpusSend é um channel. Se estiver nil, panicou antes.
 			vc.OpusSend <- opusData
 		}
 	}
