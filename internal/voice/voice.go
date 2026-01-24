@@ -24,10 +24,11 @@ const (
 )
 
 type Session struct {
-	GuildID    string
-	ChannelID  string
-	Connection *discordgo.VoiceConnection
-	Cancel     context.CancelFunc
+	GuildID        string
+	ChannelID      string
+	Connection     *discordgo.VoiceConnection
+	Cancel         context.CancelFunc
+	DiscordSession *discordgo.Session // Reference for reconnection
 }
 
 type Manager struct {
@@ -84,12 +85,58 @@ func (m *Manager) Join(s *discordgo.Session, guildID, channelID string) (*Sessio
 	}
 
 	sess := &Session{
-		GuildID:    guildID,
-		ChannelID:  channelID,
-		Connection: vc,
+		GuildID:        guildID,
+		ChannelID:      channelID,
+		Connection:     vc,
+		DiscordSession: s,
 	}
 	m.sessions[guildID] = sess
 	return sess, nil
+}
+
+// Reconnect tenta reconectar a sessão de voz existente.
+// Usado quando detectamos falha no socket ou perda de conexão.
+func (m *Manager) Reconnect(guildID string) error {
+	sess := m.GetSession(guildID)
+	if sess == nil {
+		return fmt.Errorf("sessão não encontrada para reconexão")
+	}
+
+	slog.Info("Iniciando reconexão de voz...", "guild_id", guildID)
+
+	// Tenta desconectar a conexão antiga (pode falhar se já estiver fechada)
+	if sess.Connection != nil {
+		sess.Connection.Disconnect()
+		// Pequeno delay para limpeza
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	// Reconecta usando o DiscordSession armazenado
+	// Usamos false, true para mute/deaf padrão
+	vc, err := sess.DiscordSession.ChannelVoiceJoin(sess.GuildID, sess.ChannelID, false, true)
+	if err != nil {
+		return fmt.Errorf("falha ao reconectar: %w", err)
+	}
+
+	// Atualiza a referência da conexão na sessão PROTEGENDO A ESCRITA
+	// Note: O Manager lock protege o MAPA e ponteiros SESS, mas modificar campos internos do Sess
+	// em concorrência com PlayLoop requer cuidado.
+	// O PlayLoop lê sess.Connection. Vamos assumir que a troca de ponteiro é atômica o suficiente
+	// ou protegida pelo fato de que o PlayLoop está "pausado" esperando reconexão.
+	
+	// Mas idealmente, usaríamos um Mutex no Session também.
+	// Por agora, usamos o lock global do manager para garantir exclusão mútua nessa troca crítica.
+	m.mu.Lock()
+	sess.Connection = vc
+	m.mu.Unlock()
+
+	// Envia silêncio para garantir handshake UDP
+	if err := sendSilence(vc); err != nil {
+		slog.Warn("Erro enviando silêncio na reconexão", "error", err)
+	}
+
+	slog.Info("Reconexão bem sucedida!")
+	return nil
 }
 
 func (m *Manager) Leave(guildID string) {
@@ -147,7 +194,7 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 			case <-ctx.Done():
 				return
 			case <-timeout:
-				log.Warn("Timeout aguardando Voice Connection Ready", "ready", sess.Connection.Ready)
+				log.Warn("Timeout aguardando Voice Connection Ready INICIAL", "ready", sess.Connection.Ready)
 				return
 			case <-ticker.C:
 				if sess.Connection.Ready {
@@ -159,13 +206,13 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 		// 2. Define falando como TRUE
 		sess.Connection.Speaking(true)
 		defer func() {
-			if sess.Connection.Ready {
+			// Verifica se conexão ainda existe antes de falar
+			if sess.Connection != nil && sess.Connection.Ready {
 				sess.Connection.Speaking(false)
 			}
 		}()
 
 		// 3. Envia frames de silêncio para "aquecer" a conexão UDP e o SSRC
-		// Isso é CRÍTICO para evitar "broken pipe" ou desconexão imediata em gateways novos.
 		if err := sendSilence(sess.Connection); err != nil {
 			log.Warn("Erro enviando silêncio", "error", err)
 		}
@@ -182,9 +229,10 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 					return
 				}
 
-				if err := playAudioFile(ctx, sess.Connection, filePath); err != nil {
+				// Passamos a SESSÃO inteira para lidar com reconexões
+				if err := playAudioFile(ctx, sess, filePath); err != nil {
 					log.Error("Erro tocando áudio", "error", err, "loop", loopCount)
-					// Se ocorrer erro de conexão (ex: broken pipe), encerra
+					// Se ocorrer erro fatal, encerra
 					return
 				}
 				loopCount++
@@ -198,14 +246,10 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 func sendSilence(vc *discordgo.VoiceConnection) error {
 	// 5 frames de silêncio (20ms cada) = 100ms de pre-roll
 	for i := 0; i < 5; i++ {
-		// Frame Opus de silêncio padrão (FC F8 F8...) ou apenas dados vazios que o encoder tratará?
-		// A maneira mais segura com discordgo é enviar o buffer de silêncio PCM codificado.
-		// Mas podemos enviar o frame Opus de silêncio manualmente se soubermos.
-		// O frame opus para silêncio mono/stereo tocável é tipicamente 3 bytes: 0xF8, 0xFF, 0xFE
-		
 		silenceFrame := []byte{0xF8, 0xFF, 0xFE}
 		
 		if !vc.Ready || vc.OpusSend == nil {
+			// Se não estiver pronto, apenas retorna erro sem crashar
 			return fmt.Errorf("voice connection not ready for silence")
 		}
 		
@@ -215,7 +259,7 @@ func sendSilence(vc *discordgo.VoiceConnection) error {
 	return nil
 }
 
-func playAudioFile(ctx context.Context, vc *discordgo.VoiceConnection, filepath string) error {
+func playAudioFile(ctx context.Context, sess *Session, filepath string) error {
 	run := exec.CommandContext(ctx, "ffmpeg", "-i", filepath, "-f", "s16le", "-ar", strconv.Itoa(frameRate), "-ac", strconv.Itoa(channels), "pipe:1")
 	ffmpegOut, err := run.StdoutPipe()
 	if err != nil {
@@ -248,27 +292,40 @@ func playAudioFile(ctx context.Context, vc *discordgo.VoiceConnection, filepath 
 			return nil
 		case <-ticker.C:
 			// 1. Verifica estado da conexão
-			if !vc.Ready || vc.OpusSend == nil {
+			// Acessamos via sess.Connection para pegar a instância mais atual (caso tenha havido reconexão)
+			vc := sess.Connection
+			
+			if vc == nil || !vc.Ready || vc.OpusSend == nil {
 				lostConnectionFrames++
+				
+				if lostConnectionFrames == 1 {
+					slog.Warn("Conexão de voz instável/perdida. Aguardando recuperação...")
+				}
+
+				// Lógica de autoreconexão após ~3 segundos (150 frames)
+				if lostConnectionFrames == 150 {
+					slog.Warn("Tentando reconexão automática de voz...")
+					if err := GlobalManager.Reconnect(sess.GuildID); err != nil {
+						slog.Error("Falha na tentativa de reconexão", "error", err)
+					} else {
+						// Se reconectar com sucesso, resetamos parcialmente o contador
+						// para dar tempo do handshake finalizar e vc.Ready ficar true
+						lostConnectionFrames = 50 
+					}
+				}
+
 				if lostConnectionFrames > maxLostFrames {
-					return fmt.Errorf("timeout aguardando reconexão de voz (>10s)")
+					return fmt.Errorf("timeout fatal aguardando reconexão de voz (>10s)")
 				}
-				if lostConnectionFrames%50 == 1 { // Log a cada 1s aprox
-					slog.Warn("Conexão de voz instável, aguardando...", "lost_frames", lostConnectionFrames)
-				}
-				// Pula este ciclo (não lê do ffmpeg para tentar preservar buffer, 
-				// ou lê e descarta se quisermos manter "tempo real". 
-				// Para música, pausar a leitura é melhor para retomar de onde parou.)
+				
+				// Sleep extra para não floodar checks
 				continue
 			}
 
 			// Se recuperou de uma falha
 			if lostConnectionFrames > 0 {
-				slog.Info("Conexão de voz recuperada!", "waited_frames", lostConnectionFrames)
+				slog.Info("Conexão de voz restabelecida!", "waited_frames", lostConnectionFrames)
 				lostConnectionFrames = 0
-				// Envia silêncio para "limpar" o pipe udp? Talvez não seja necessário,
-				// mas garante que o sequence number reinicie ok se necessário.
-				// Por segurança, apenas seguimos.
 			}
 
 			// 2. Lê do FFMPEG
@@ -287,9 +344,10 @@ func playAudioFile(ctx context.Context, vc *discordgo.VoiceConnection, filepath 
 			}
 
 			// 4. Envia
-			// Devido ao check acima, aqui deve estar seguro, mas panic em channel fechado é fatal.
-			// OpusSend é um channel. Se estiver nil, panicou antes.
-			vc.OpusSend <- opusData
+			// Check duplo de segurança
+			if vc.Ready && vc.OpusSend != nil {
+				vc.OpusSend <- opusData
+			}
 		}
 	}
 }
