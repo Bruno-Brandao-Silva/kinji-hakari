@@ -26,6 +26,14 @@ func GetCommands() []*discordgo.ApplicationCommand {
 		{
 			Name:        "leave",
 			Description: "Kinji Hakari libera seu domínio.",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionBoolean,
+					Name:        "apos-musica",
+					Description: "Sair apenas após o término da batida atual?",
+					Required:    false,
+				},
+			},
 		},
 	}
 }
@@ -133,6 +141,38 @@ func (b *Bot) handleJackpot(s *discordgo.Session, i *discordgo.InteractionCreate
 }
 
 func (b *Bot) handleLeave(s *discordgo.Session, i *discordgo.InteractionCreate, log *slog.Logger) {
+	// Verifica opções
+	lazy := false
+	data := i.ApplicationCommandData()
+	if len(data.Options) > 0 {
+		for _, opt := range data.Options {
+			if opt.Name == "apos-musica" {
+				lazy = opt.BoolValue()
+			}
+		}
+	}
+
+	if lazy {
+		sess := voice.GlobalManager.GetSession(i.GuildID)
+		if sess == nil {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{Content: "Não estou em um canal de voz."},
+			})
+			return
+		}
+
+		sess.SetLazyExit(true)
+		log.Info("Lazy Exit agendado")
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Domínio será liberado após o fim da música.",
+			},
+		})
+		return
+	}
+
 	voice.GlobalManager.Leave(i.GuildID)
 	log.Info("Desconectou do canal de voz")
 

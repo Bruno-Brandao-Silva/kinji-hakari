@@ -29,6 +29,8 @@ type Session struct {
 	Connection     *discordgo.VoiceConnection
 	Cancel         context.CancelFunc
 	DiscordSession *discordgo.Session // Reference for reconnection
+	LazyExit       bool
+	mu             sync.Mutex
 }
 
 type Manager struct {
@@ -155,6 +157,18 @@ func (m *Manager) Leave(guildID string) {
 	}
 }
 
+func (sess *Session) SetLazyExit(lazy bool) {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	sess.LazyExit = lazy
+}
+
+func (sess *Session) IsLazyExit() bool {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return sess.LazyExit
+}
+
 func (sess *Session) PlayLoop(filePath string, loops int) {
 	if sess.Cancel != nil {
 		sess.Cancel()
@@ -235,6 +249,13 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 					// Se ocorrer erro fatal, encerra
 					return
 				}
+				
+				// Verifica Lazy Exit após terminar a música
+				if sess.IsLazyExit() {
+					log.Info("Lazy Exit ativado: saindo após término da música.")
+					return
+				}
+
 				loopCount++
 				time.Sleep(100 * time.Millisecond)
 			}
