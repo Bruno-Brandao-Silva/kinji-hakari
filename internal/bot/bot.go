@@ -191,6 +191,15 @@ func (b *Bot) VoiceStateUpdateHandler(s *discordgo.Session, v *discordgo.VoiceSt
 		if v.ChannelID == "" {
 			// Bot desconectou
 			slog.Info("Bot desconectado do canal de voz", "guild_id", v.GuildID)
+			
+			// Se o bot estiver reconectando, ignoramos este evento de disconnect
+			// pois é esperado durante o processo de reconexão.
+			sess := voice.GlobalManager.GetSession(v.GuildID)
+			if sess != nil && sess.IsReconnecting() {
+				slog.Info("Ignorando disconnect pois estamos reconectando...", "guild_id", v.GuildID)
+				return
+			}
+
 			voice.GlobalManager.Leave(v.GuildID)
 		}
 		return

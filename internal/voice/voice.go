@@ -30,6 +30,7 @@ type Session struct {
 	Cancel         context.CancelFunc
 	DiscordSession *discordgo.Session // Reference for reconnection
 	LazyExit       bool
+	Reconnecting   bool
 	mu             sync.Mutex
 }
 
@@ -105,6 +106,8 @@ func (m *Manager) Reconnect(guildID string) error {
 	}
 
 	slog.Info("Iniciando reconexão de voz...", "guild_id", guildID)
+	
+	sess.SetReconnecting(true)
 
 	// Tenta desconectar a conexão antiga (pode falhar se já estiver fechada)
 	if sess.Connection != nil {
@@ -117,6 +120,7 @@ func (m *Manager) Reconnect(guildID string) error {
 	// Usamos false, true para mute/deaf padrão
 	vc, err := sess.DiscordSession.ChannelVoiceJoin(sess.GuildID, sess.ChannelID, false, true)
 	if err != nil {
+		sess.SetReconnecting(false) // Falha, reseta flag
 		return fmt.Errorf("falha ao reconectar: %w", err)
 	}
 
@@ -136,6 +140,8 @@ func (m *Manager) Reconnect(guildID string) error {
 	if err := sendSilence(vc); err != nil {
 		slog.Warn("Erro enviando silêncio na reconexão", "error", err)
 	}
+	
+	sess.SetReconnecting(false) // Sucesso, reseta flag
 
 	slog.Info("Reconexão bem sucedida!")
 	return nil
@@ -167,6 +173,18 @@ func (sess *Session) IsLazyExit() bool {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	return sess.LazyExit
+}
+
+func (sess *Session) SetReconnecting(reconnecting bool) {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	sess.Reconnecting = reconnecting
+}
+
+func (sess *Session) IsReconnecting() bool {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return sess.Reconnecting
 }
 
 func (sess *Session) PlayLoop(filePath string, loops int) {
