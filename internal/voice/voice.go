@@ -137,6 +137,7 @@ func (m *Manager) Reconnect(guildID string) error {
 	m.mu.Unlock()
 
 	// Envia silêncio para garantir handshake UDP
+	time.Sleep(250 * time.Millisecond)
 	if err := sendSilence(vc); err != nil {
 		slog.Warn("Erro enviando silêncio na reconexão", "error", err)
 	}
@@ -234,6 +235,9 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 				}
 			}
 		}
+
+		// Aguarda estabilização da conexão UDP (evita panic no opusSender)
+		time.Sleep(250 * time.Millisecond)
 
 		// 2. Define falando como TRUE
 		sess.Connection.Speaking(true)
