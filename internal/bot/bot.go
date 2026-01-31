@@ -1,8 +1,11 @@
 package bot
 
 import (
+	"fmt"
 	"hakari-bot/internal/voice"
 	"log/slog"
+	"os"
+	"os/exec"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -10,6 +13,7 @@ import (
 
 // Definição dos comandos
 func GetCommands() []*discordgo.ApplicationCommand {
+	var minVolume float64 = 0
 	return []*discordgo.ApplicationCommand{
 		{
 			Name:        "jackpot",
@@ -21,7 +25,19 @@ func GetCommands() []*discordgo.ApplicationCommand {
 					Description: "Quantas vezes repetir? (Vazio = Infinito)",
 					Required:    false,
 				},
+				{
+					Type:        discordgo.ApplicationCommandOptionInteger,
+					Name:        "volume",
+					Description: "Volume da música (0-200, Padrão: 100)",
+					Required:    false,
+					MinValue:    &minVolume,
+					MaxValue:    100,
+				},
 			},
+		},
+		{
+			Name:        "status",
+			Description: "Verifica o status do bot e dependências.",
 		},
 		{
 			Name:        "leave",
@@ -66,6 +82,8 @@ func (b *Bot) InteractionHandler(s *discordgo.Session, i *discordgo.InteractionC
 		b.handleJackpot(s, i, data, log)
 	case "leave":
 		b.handleLeave(s, i, log)
+	case "status":
+		b.handleStatus(s, i, log)
 	}
 }
 
@@ -100,10 +118,17 @@ func (b *Bot) handleJackpot(s *discordgo.Session, i *discordgo.InteractionCreate
 		return
 	}
 
-	// Verifica loops
+	// Verifica parametros
 	loops := 0
-	if len(data.Options) > 0 {
-		loops = int(data.Options[0].FloatValue())
+	volume := 100
+	
+	for _, opt := range data.Options {
+		switch opt.Name {
+		case "quantas-vezes":
+			loops = int(opt.FloatValue())
+		case "volume":
+			volume = int(opt.IntValue())
+		}
 	}
 
 	// Responde com Embed
@@ -135,9 +160,49 @@ func (b *Bot) handleJackpot(s *discordgo.Session, i *discordgo.InteractionCreate
 	}
 
 	// Inicia Playback
-	// Certifique-se que o arquivo tuca-donka.mp3 está na raiz
-	log.Info("Iniciando playback", "loops", loops, "file", "./tuca-donka.mp3")
-	sess.PlayLoop("./tuca-donka.mp3", loops)
+	filePath := "./tuca-donka.mp3"
+	
+	// Verifica se arquivo existe
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		slog.Error("Arquivo de áudio não encontrado", "file", filePath)
+		s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: "⚠️ **Erro Crítico:** O arquivo de áudio `tuca-donka.mp3` não foi encontrado no servidor.",
+		})
+		voice.GlobalManager.Leave(guildID)
+		return
+	}
+
+	log.Info("Iniciando playback", "loops", loops, "volume", volume, "file", filePath)
+	sess.PlayLoop(filePath, loops, volume)
+}
+
+func (b *Bot) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate, log *slog.Logger) {
+	// 1. Checa Latência Discord
+	latency := s.HeartbeatLatency()
+	
+	// 2. Checa FFMPEG
+	ffmpegStatus := "✅ Instalado"
+	path, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		ffmpegStatus = "❌ Não encontrado"
+	} else {
+		ffmpegStatus += fmt.Sprintf(" (`%s`)", path)
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title: "Status do Sistema",
+		Color: 0x3498db,
+		Fields: []*discordgo.MessageEmbedField{
+			{Name: "Latência API", Value: fmt.Sprintf("%d ms", latency.Milliseconds()), Inline: true},
+			{Name: "FFmpeg", Value: ffmpegStatus, Inline: true},
+			{Name: "Goroutines", Value: fmt.Sprintf("%d", 0), Inline: true}, // Placeholder or actual runtime.NumGoroutine()
+		},
+	}
+	
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{embed}},
+	})
 }
 
 func (b *Bot) handleLeave(s *discordgo.Session, i *discordgo.InteractionCreate, log *slog.Logger) {

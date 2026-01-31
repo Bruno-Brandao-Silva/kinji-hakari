@@ -31,7 +31,7 @@ type Session struct {
 	DiscordSession *discordgo.Session // Reference for reconnection
 	LazyExit       bool
 	Reconnecting   bool
-	mu             sync.Mutex
+	mu             sync.RWMutex
 }
 
 type Manager struct {
@@ -125,16 +125,9 @@ func (m *Manager) Reconnect(guildID string) error {
 	}
 
 	// Atualiza a referência da conexão na sessão PROTEGENDO A ESCRITA
-	// Note: O Manager lock protege o MAPA e ponteiros SESS, mas modificar campos internos do Sess
-	// em concorrência com PlayLoop requer cuidado.
-	// O PlayLoop lê sess.Connection. Vamos assumir que a troca de ponteiro é atômica o suficiente
-	// ou protegida pelo fato de que o PlayLoop está "pausado" esperando reconexão.
-	
-	// Mas idealmente, usaríamos um Mutex no Session também.
-	// Por agora, usamos o lock global do manager para garantir exclusão mútua nessa troca crítica.
-	m.mu.Lock()
+	sess.mu.Lock()
 	sess.Connection = vc
-	m.mu.Unlock()
+	sess.mu.Unlock()
 
 	// Envia silêncio para garantir handshake UDP
 	time.Sleep(250 * time.Millisecond)
@@ -165,30 +158,30 @@ func (m *Manager) Leave(guildID string) {
 }
 
 func (sess *Session) SetLazyExit(lazy bool) {
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
 	sess.LazyExit = lazy
 }
 
 func (sess *Session) IsLazyExit() bool {
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
 	return sess.LazyExit
 }
 
 func (sess *Session) SetReconnecting(reconnecting bool) {
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
 	sess.Reconnecting = reconnecting
 }
 
 func (sess *Session) IsReconnecting() bool {
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
+	sess.mu.RLock()
+	defer sess.mu.RUnlock()
 	return sess.Reconnecting
 }
 
-func (sess *Session) PlayLoop(filePath string, loops int) {
+func (sess *Session) GetConnection() *discordgo.VoiceConnection {
+	sess.mu.RLock()
+	defer sess.mu.RUnlock()
+	return sess.Connection
+}
+
+func (sess *Session) PlayLoop(filePath string, loops int, volume int) {
 	if sess.Cancel != nil {
 		sess.Cancel()
 	}
@@ -266,7 +259,7 @@ func (sess *Session) PlayLoop(filePath string, loops int) {
 				}
 
 				// Passamos a SESSÃO inteira para lidar com reconexões
-				if err := playAudioFile(ctx, sess, filePath); err != nil {
+				if err := playAudioFile(ctx, sess, filePath, volume); err != nil {
 					log.Error("Erro tocando áudio", "error", err, "loop", loopCount)
 					// Se ocorrer erro fatal, encerra
 					return
@@ -302,8 +295,10 @@ func sendSilence(vc *discordgo.VoiceConnection) error {
 	return nil
 }
 
-func playAudioFile(ctx context.Context, sess *Session, filepath string) error {
-	run := exec.CommandContext(ctx, "ffmpeg", "-i", filepath, "-f", "s16le", "-ar", strconv.Itoa(frameRate), "-ac", strconv.Itoa(channels), "pipe:1")
+func playAudioFile(ctx context.Context, sess *Session, filepath string, volume int) error {
+	// Volume filter: e.g. "volume=1.0" for 100%, "volume=0.5" for 50%
+	volFilter := fmt.Sprintf("volume=%.2f", float64(volume)/100.0)
+	run := exec.CommandContext(ctx, "ffmpeg", "-i", filepath, "-filter:a", volFilter, "-f", "s16le", "-ar", strconv.Itoa(frameRate), "-ac", strconv.Itoa(channels), "pipe:1")
 	ffmpegOut, err := run.StdoutPipe()
 	if err != nil {
 		return err
@@ -335,8 +330,8 @@ func playAudioFile(ctx context.Context, sess *Session, filepath string) error {
 			return nil
 		case <-ticker.C:
 			// 1. Verifica estado da conexão
-			// Acessamos via sess.Connection para pegar a instância mais atual (caso tenha havido reconexão)
-			vc := sess.Connection
+			// Acessamos via GetConnection (Safe/Locked) para pegar a instância mais atual
+			vc := sess.GetConnection()
 			
 			if vc == nil || !vc.Ready || vc.OpusSend == nil {
 				lostConnectionFrames++
