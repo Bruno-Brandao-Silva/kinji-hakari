@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"hakari-bot/internal/voice"
 	"log/slog"
-	"os"
 	"os/exec"
 	"time"
 
@@ -67,14 +66,14 @@ func (b *Bot) InteractionHandler(s *discordgo.Session, i *discordgo.InteractionC
 	}
 
 	data := i.ApplicationCommandData()
-	
+
 	// Logger contextual para a requisição
 	log := slog.With(
 		"command", data.Name,
 		"user_id", i.Member.User.ID,
 		"guild_id", i.GuildID,
 	)
-	
+
 	log.Info("Comando recebido")
 
 	switch data.Name {
@@ -121,7 +120,7 @@ func (b *Bot) handleJackpot(s *discordgo.Session, i *discordgo.InteractionCreate
 	// Verifica parametros
 	loops := 0
 	volume := 100
-	
+
 	for _, opt := range data.Options {
 		switch opt.Name {
 		case "quantas-vezes":
@@ -160,26 +159,23 @@ func (b *Bot) handleJackpot(s *discordgo.Session, i *discordgo.InteractionCreate
 	}
 
 	// Inicia Playback
-	filePath := "./tuca-donka.mp3"
-	
-	// Verifica se arquivo existe
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		slog.Error("Arquivo de áudio não encontrado", "file", filePath)
+	if len(voice.AudioCache) == 0 {
+		slog.Error("Cache de áudio vazio!")
 		s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Content: "⚠️ **Erro Crítico:** O arquivo de áudio `tuca-donka.mp3` não foi encontrado no servidor.",
+			Content: "⚠️ **Erro Crítico:** O áudio não foi carregado na memória.",
 		})
 		voice.GlobalManager.Leave(guildID)
 		return
 	}
 
-	log.Info("Iniciando playback", "loops", loops, "volume", volume, "file", filePath)
-	sess.PlayLoop(filePath, loops, volume)
+	log.Info("Iniciando playback", "loops", loops, "volume", volume, "size", len(voice.AudioCache))
+	sess.PlayLoop(voice.AudioCache, loops, volume)
 }
 
 func (b *Bot) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate, log *slog.Logger) {
 	// 1. Checa Latência Discord
 	latency := s.HeartbeatLatency()
-	
+
 	// 2. Checa FFMPEG
 	ffmpegStatus := "✅ Instalado"
 	path, err := exec.LookPath("ffmpeg")
@@ -198,7 +194,7 @@ func (b *Bot) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate,
 			{Name: "Goroutines", Value: fmt.Sprintf("%d", 0), Inline: true}, // Placeholder or actual runtime.NumGoroutine()
 		},
 	}
-	
+
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{embed}},
@@ -256,7 +252,7 @@ func (b *Bot) VoiceStateUpdateHandler(s *discordgo.Session, v *discordgo.VoiceSt
 		if v.ChannelID == "" {
 			// Bot desconectou
 			slog.Info("Bot desconectado do canal de voz", "guild_id", v.GuildID)
-			
+
 			// Se o bot estiver reconectando, ignoramos este evento de disconnect
 			// pois é esperado durante o processo de reconexão.
 			sess := voice.GlobalManager.GetSession(v.GuildID)
@@ -313,3 +309,17 @@ func (b *Bot) VoiceStateUpdateHandler(s *discordgo.Session, v *discordgo.VoiceSt
 		}
 	}
 }
+
+// VoiceServerUpdateHandler lida com a mudança de servidor de voz (Load Balancing)
+func (b *Bot) VoiceServerUpdateHandler(s *discordgo.Session, v *discordgo.VoiceServerUpdate) {
+	slog.Info("Voice Server Update received", "guild_id", v.GuildID, "endpoint", v.Endpoint)
+
+	// Notifica o gerenciador de voz para tratar a migração
+	if v.Endpoint == "" {
+		slog.Warn("Voice Server Update com endpoint vazio", "guild_id", v.GuildID)
+		return
+	}
+
+	voice.GlobalManager.HandleServerUpdate(v)
+}
+

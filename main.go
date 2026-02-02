@@ -8,6 +8,7 @@ import (
 
 	"hakari-bot/internal/bot"
 	"hakari-bot/internal/logger"
+	"hakari-bot/internal/voice"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
@@ -21,6 +22,13 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		slog.Warn("Arquivo .env não encontrado, usando vars do sistema.")
 	}
+
+	// 2.5 Carrega áudio para memória
+	if err := voice.LoadAudio("./tuca-donka.mp3"); err != nil {
+		slog.Error("Erro fatal ao carregar áudio", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("Áudio carregado na memória com sucesso!")
 
 	token := os.Getenv("TOKEN")
 	if token == "" {
@@ -43,6 +51,7 @@ func main() {
 	b := bot.NewBot()
 	s.AddHandler(b.InteractionHandler)
 	s.AddHandler(b.VoiceStateUpdateHandler)
+	s.AddHandler(b.VoiceServerUpdateHandler)
 
 	// 6. Abre conexão
 	if err := s.Open(); err != nil {

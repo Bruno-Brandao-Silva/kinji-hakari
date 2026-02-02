@@ -2,11 +2,13 @@ package voice
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -31,6 +33,7 @@ type Session struct {
 	DiscordSession *discordgo.Session // Reference for reconnection
 	LazyExit       bool
 	Reconnecting   bool
+	Migrating      bool
 	mu             sync.RWMutex
 }
 
@@ -97,6 +100,21 @@ func (m *Manager) Join(s *discordgo.Session, guildID, channelID string) (*Sessio
 	return sess, nil
 }
 
+// HandleServerUpdate trata o evento de mudança de servidor de voz
+func (m *Manager) HandleServerUpdate(v *discordgo.VoiceServerUpdate) {
+	sess := m.GetSession(v.GuildID)
+	if sess == nil {
+		return
+	}
+
+	slog.Info("Recebido Voice Server Update (Migração)", "guild_id", v.GuildID, "endpoint", v.Endpoint)
+	sess.SetMigrating(true)
+	
+	// Opcional: Se necessário, podemos forçar uma reconexão aqui,
+	// mas geralmente o PlayLoop vai detectar a queda e reconectar.
+	// A flag Migrating serve para evitar que o PlayLoop encerre o bot por achar que é um erro fatal.
+}
+
 // Reconnect tenta reconectar a sessão de voz existente.
 // Usado quando detectamos falha no socket ou perda de conexão.
 func (m *Manager) Reconnect(guildID string) error {
@@ -106,7 +124,7 @@ func (m *Manager) Reconnect(guildID string) error {
 	}
 
 	slog.Info("Iniciando reconexão de voz...", "guild_id", guildID)
-	
+
 	sess.SetReconnecting(true)
 
 	// Tenta desconectar a conexão antiga (pode falhar se já estiver fechada)
@@ -134,7 +152,7 @@ func (m *Manager) Reconnect(guildID string) error {
 	if err := sendSilence(vc); err != nil {
 		slog.Warn("Erro enviando silêncio na reconexão", "error", err)
 	}
-	
+
 	sess.SetReconnecting(false) // Sucesso, reseta flag
 
 	slog.Info("Reconexão bem sucedida!")
@@ -175,13 +193,38 @@ func (sess *Session) IsReconnecting() bool {
 	return sess.Reconnecting
 }
 
+func (sess *Session) SetMigrating(migrating bool) {
+	sess.mu.Lock()
+	sess.Migrating = migrating
+	sess.mu.Unlock()
+}
+
+func (sess *Session) IsMigrating() bool {
+	sess.mu.RLock()
+	defer sess.mu.RUnlock()
+	return sess.Migrating
+}
+
 func (sess *Session) GetConnection() *discordgo.VoiceConnection {
 	sess.mu.RLock()
 	defer sess.mu.RUnlock()
 	return sess.Connection
 }
 
-func (sess *Session) PlayLoop(filePath string, loops int, volume int) {
+// AudioCache armazena o arquivo de áudio na RAM
+var AudioCache []byte
+
+// LoadAudio carrega o arquivo de áudio para a memória
+func LoadAudio(path string) error {
+	file, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("erro ao ler arquivo de áudio: %w", err)
+	}
+	AudioCache = file
+	return nil
+}
+
+func (sess *Session) PlayLoop(audioData []byte, loops int, volume int) {
 	if sess.Cancel != nil {
 		sess.Cancel()
 	}
@@ -202,7 +245,7 @@ func (sess *Session) PlayLoop(filePath string, loops int, volume int) {
 				log.Info("Playback cancelado (substituição)")
 				return
 			}
-			
+
 			log.Info("Playback finalizado, saindo do canal em 1s...")
 			time.Sleep(1 * time.Second)
 			GlobalManager.Leave(sess.GuildID)
@@ -259,12 +302,12 @@ func (sess *Session) PlayLoop(filePath string, loops int, volume int) {
 				}
 
 				// Passamos a SESSÃO inteira para lidar com reconexões
-				if err := playAudioFile(ctx, sess, filePath, volume); err != nil {
+				if err := playAudioFile(ctx, sess, audioData, volume); err != nil {
 					log.Error("Erro tocando áudio", "error", err, "loop", loopCount)
 					// Se ocorrer erro fatal, encerra
 					return
 				}
-				
+
 				// Verifica Lazy Exit após terminar a música
 				if sess.IsLazyExit() {
 					log.Info("Lazy Exit ativado: saindo após término da música.")
@@ -283,22 +326,27 @@ func sendSilence(vc *discordgo.VoiceConnection) error {
 	// 5 frames de silêncio (20ms cada) = 100ms de pre-roll
 	for i := 0; i < 5; i++ {
 		silenceFrame := []byte{0xF8, 0xFF, 0xFE}
-		
+
 		if !vc.Ready || vc.OpusSend == nil {
 			// Se não estiver pronto, apenas retorna erro sem crashar
 			return fmt.Errorf("voice connection not ready for silence")
 		}
-		
+
 		vc.OpusSend <- silenceFrame
 		time.Sleep(20 * time.Millisecond)
 	}
 	return nil
 }
 
-func playAudioFile(ctx context.Context, sess *Session, filepath string, volume int) error {
+func playAudioFile(ctx context.Context, sess *Session, audioData []byte, volume int) error {
 	// Volume filter: e.g. "volume=1.0" for 100%, "volume=0.5" for 50%
 	volFilter := fmt.Sprintf("volume=%.2f", float64(volume)/100.0)
-	run := exec.CommandContext(ctx, "ffmpeg", "-i", filepath, "-filter:a", volFilter, "-f", "s16le", "-ar", strconv.Itoa(frameRate), "-ac", strconv.Itoa(channels), "pipe:1")
+
+	// Use pipe:0 to read from stdin
+	run := exec.CommandContext(ctx, "ffmpeg", "-i", "pipe:0", "-filter:a", volFilter, "-f", "s16le", "-ar", strconv.Itoa(frameRate), "-ac", strconv.Itoa(channels), "pipe:1")
+
+	run.Stdin = bytes.NewReader(audioData)
+
 	ffmpegOut, err := run.StdoutPipe()
 	if err != nil {
 		return err
@@ -332,30 +380,42 @@ func playAudioFile(ctx context.Context, sess *Session, filepath string, volume i
 			// 1. Verifica estado da conexão
 			// Acessamos via GetConnection (Safe/Locked) para pegar a instância mais atual
 			vc := sess.GetConnection()
-			
+
 			if vc == nil || !vc.Ready || vc.OpusSend == nil {
 				lostConnectionFrames++
-				
+
 				if lostConnectionFrames == 1 {
 					slog.Warn("Conexão de voz instável/perdida. Aguardando recuperação...")
 				}
 
 				// Lógica de autoreconexão após ~3 segundos (150 frames)
-				if lostConnectionFrames == 150 {
-					slog.Warn("Tentando reconexão automática de voz...")
+				// Se estiver migrando, tentamos reconectar mais rápido ou apenas aguardamos
+				if sess.IsMigrating() {
+					if lostConnectionFrames%50 == 0 { // Loga a cada 1s durante migração
+						slog.Info("Aguardando migração de servidor de voz completar...")
+					}
+				}
+
+				if lostConnectionFrames == 150 || (sess.IsMigrating() && lostConnectionFrames == 50) {
+					slog.Warn("Tentando reconexão automática de voz (Retry)...")
 					if err := GlobalManager.Reconnect(sess.GuildID); err != nil {
 						slog.Error("Falha na tentativa de reconexão", "error", err)
 					} else {
 						// Se reconectar com sucesso, resetamos parcialmente o contador
-						// para dar tempo do handshake finalizar e vc.Ready ficar true
-						lostConnectionFrames = 50 
+						lostConnectionFrames = 20
 					}
 				}
 
-				if lostConnectionFrames > maxLostFrames {
-					return fmt.Errorf("timeout fatal aguardando reconexão de voz (>10s)")
+				// Aumentar timeout se estiver migrando (Discord pode demorar na troca de região)
+				limit := maxLostFrames
+				if sess.IsMigrating() {
+					limit = maxLostFrames * 2 // Dobra o timeout (20s)
 				}
-				
+
+				if lostConnectionFrames > limit {
+					return fmt.Errorf("timeout fatal aguardando reconexão de voz (limit=%d)", limit)
+				}
+
 				// Sleep extra para não floodar checks
 				continue
 			}
@@ -364,6 +424,7 @@ func playAudioFile(ctx context.Context, sess *Session, filepath string, volume i
 			if lostConnectionFrames > 0 {
 				slog.Info("Conexão de voz restabelecida!", "waited_frames", lostConnectionFrames)
 				lostConnectionFrames = 0
+				sess.SetMigrating(false) // Reset flag
 			}
 
 			// 2. Lê do FFMPEG
