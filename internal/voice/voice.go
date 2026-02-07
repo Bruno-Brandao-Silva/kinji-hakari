@@ -113,6 +113,15 @@ func (m *Manager) HandleServerUpdate(v *discordgo.VoiceServerUpdate) {
 	// Opcional: Se necessário, podemos forçar uma reconexão aqui,
 	// mas geralmente o PlayLoop vai detectar a queda e reconectar.
 	// A flag Migrating serve para evitar que o PlayLoop encerre o bot por achar que é um erro fatal.
+
+	// Adicione um time.AfterFunc de segurança (ex: 8 segundos) para resetar a flag Migrating para false automaticamente
+	// caso a migração trave, permitindo que o bot se recupere.
+	time.AfterFunc(8*time.Second, func() {
+		if sess.IsMigrating() {
+			slog.Warn("Migração demorou muito, resetando flag forçadamente", "guild_id", v.GuildID)
+			sess.SetMigrating(false)
+		}
+	})
 }
 
 // Reconnect tenta reconectar a sessão de voz existente.
@@ -370,13 +379,19 @@ func playAudioFile(ctx context.Context, sess *Session, audioData []byte, volume 
 
 	// Controle de retry de conexão
 	lostConnectionFrames := 0
-	maxLostFrames := 500 // ~10 segundos (500 * 20ms)
+	maxLostFrames := 1000 // Aumentado para ~20 segundos (1000 * 20ms) para evitar Reconnect Storms
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			// 0. Verifica se está migrando
+			// Se estiver, pausamos o envio e aguardamos (continue o loop sem erro)
+			if sess.IsMigrating() {
+				continue
+			}
+
 			// 1. Verifica estado da conexão
 			// Acessamos via GetConnection (Safe/Locked) para pegar a instância mais atual
 			vc := sess.GetConnection()
@@ -388,15 +403,9 @@ func playAudioFile(ctx context.Context, sess *Session, audioData []byte, volume 
 					slog.Warn("Conexão de voz instável/perdida. Aguardando recuperação...")
 				}
 
-				// Lógica de autoreconexão após ~3 segundos (150 frames)
-				// Se estiver migrando, tentamos reconectar mais rápido ou apenas aguardamos
-				if sess.IsMigrating() {
-					if lostConnectionFrames%50 == 0 { // Loga a cada 1s durante migração
-						slog.Info("Aguardando migração de servidor de voz completar...")
-					}
-				}
-
-				if lostConnectionFrames == 150 || (sess.IsMigrating() && lostConnectionFrames == 50) {
+				// Lógica de autoreconexão após ~5 segundos (250 frames)
+				// Aumentamos a tolerância antes de tentar reconectar manualmente
+				if lostConnectionFrames == 250 {
 					slog.Warn("Tentando reconexão automática de voz (Retry)...")
 					if err := GlobalManager.Reconnect(sess.GuildID); err != nil {
 						slog.Error("Falha na tentativa de reconexão", "error", err)
@@ -406,14 +415,8 @@ func playAudioFile(ctx context.Context, sess *Session, audioData []byte, volume 
 					}
 				}
 
-				// Aumentar timeout se estiver migrando (Discord pode demorar na troca de região)
-				limit := maxLostFrames
-				if sess.IsMigrating() {
-					limit = maxLostFrames * 2 // Dobra o timeout (20s)
-				}
-
-				if lostConnectionFrames > limit {
-					return fmt.Errorf("timeout fatal aguardando reconexão de voz (limit=%d)", limit)
+				if lostConnectionFrames > maxLostFrames {
+					return fmt.Errorf("timeout fatal aguardando reconexão de voz (limit=%d)", maxLostFrames)
 				}
 
 				// Sleep extra para não floodar checks
@@ -424,7 +427,6 @@ func playAudioFile(ctx context.Context, sess *Session, audioData []byte, volume 
 			if lostConnectionFrames > 0 {
 				slog.Info("Conexão de voz restabelecida!", "waited_frames", lostConnectionFrames)
 				lostConnectionFrames = 0
-				sess.SetMigrating(false) // Reset flag
 			}
 
 			// 2. Lê do FFMPEG
@@ -442,10 +444,17 @@ func playAudioFile(ctx context.Context, sess *Session, audioData []byte, volume 
 				continue
 			}
 
-			// 4. Envia
-			// Check duplo de segurança
+			// 4. Envia de forma não bloqueante
+			// O canal vc.OpusSend pode bloquear se a conexão UDP cair
+			// Usamos select/default para evitar travar a Goroutine
 			if vc.Ready && vc.OpusSend != nil {
-				vc.OpusSend <- opusData
+				select {
+				case vc.OpusSend <- opusData:
+					// Enviado com sucesso
+				default:
+					// Buffer cheio ou bloqueado, dropamos o frame
+					// slog.Warn("OpusSend bloqueado, dropando frame")
+				}
 			}
 		}
 	}
