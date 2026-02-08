@@ -116,7 +116,7 @@ func (m *Manager) HandleServerUpdate(v *discordgo.VoiceServerUpdate) {
 
 	// Adicione um time.AfterFunc de segurança (ex: 8 segundos) para resetar a flag Migrating para false automaticamente
 	// caso a migração trave, permitindo que o bot se recupere.
-	time.AfterFunc(8*time.Second, func() {
+	time.AfterFunc(30*time.Second, func() {
 		if sess.IsMigrating() {
 			slog.Warn("Migração demorou muito, resetando flag forçadamente", "guild_id", v.GuildID)
 			sess.SetMigrating(false)
