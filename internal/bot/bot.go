@@ -19,6 +19,11 @@ const (
 	voiceOpenTimeout  = 15 * time.Second
 	voiceCloseTimeout = 10 * time.Second
 	aloneLeaveDelay   = 5 * time.Second
+	daveReadyTimeout  = 10 * time.Second
+	daveReadyAttempts = 3
+	// Our own reconnects emit a leave event for the bot; waiting lets the
+	// rejoin reach the cache so that event is not mistaken for a kick.
+	botDisconnectCheckDelay = 2 * time.Second
 	// Lets the sender flush trailing silence frames before disconnecting.
 	finishLeaveDelay = time.Second
 )
@@ -61,13 +66,23 @@ func (b *Bot) play(client *disgobot.Client, guildID, channelID snowflake.ID, loo
 	}
 
 	b.setSession(guildID, &session{player: player, channelID: channelID})
-	conn, err := connect(client, guildID, channelID)
+	open := func() (voice.Conn, error) { return connect(client, guildID, channelID) }
+	discard := func(conn voice.Conn) {
+		slog.Warn("DAVE não ficou pronto, reconectando...", "guild_id", guildID)
+		closeConn(conn)
+	}
+	conn, err := openUntilReady(daveReadyAttempts, daveReadyTimeout, open, isDAVEReady, discard)
 	if err != nil {
 		b.removeSession(guildID, player)
+		closeConn(client.VoiceManager.GetConn(guildID))
 		return err
 	}
 	conn.SetOpusFrameProvider(player)
 	return nil
+}
+
+func isDAVEReady(conn voice.Conn) bool {
+	return conn.DAVE().Ready()
 }
 
 // connect reuses the guild connection when already in channelID and reopens it otherwise.

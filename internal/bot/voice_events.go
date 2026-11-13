@@ -35,11 +35,18 @@ func (b *Bot) OnVoiceMove(e *events.GuildVoiceMove) {
 }
 
 func (b *Bot) handleBotDisconnected(client *disgobot.Client, guildID snowflake.ID, oldChannel *snowflake.ID) {
-	if !b.sessionInChannel(guildID, oldChannel) {
-		return
-	}
-	slog.Info("Bot desconectado do canal de voz", "guild_id", guildID)
-	b.leave(client, guildID)
+	time.AfterFunc(botDisconnectCheckDelay, func() {
+		if !b.sessionInChannel(guildID, oldChannel) || botInVoice(client, guildID) {
+			return
+		}
+		slog.Info("Bot desconectado do canal de voz", "guild_id", guildID)
+		b.leave(client, guildID)
+	})
+}
+
+func botInVoice(client *disgobot.Client, guildID snowflake.ID) bool {
+	state, ok := client.Caches.VoiceState(guildID, client.ID())
+	return ok && state.ChannelID != nil
 }
 
 func (b *Bot) followBotMove(guildID snowflake.ID, channelID *snowflake.ID) {
