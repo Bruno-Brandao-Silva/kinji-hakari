@@ -1,5 +1,5 @@
 # gopus compiles bundled libopus via cgo, so the build stage needs a C toolchain.
-FROM golang:1.24-bookworm AS build
+FROM golang:1.26-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

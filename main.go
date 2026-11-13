@@ -1,85 +1,95 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/disgoorg/disgo"
+	disgobot "github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/cache"
+	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/joho/godotenv"
+	"github.com/thomas-vilte/dave-go/session"
+
+	"hakari-bot/internal/audio"
 	"hakari-bot/internal/bot"
 	"hakari-bot/internal/logger"
-	"hakari-bot/internal/voice"
+)
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/joho/godotenv"
+const (
+	audioPath       = "./tuca-donka.mp3"
+	shutdownTimeout = 10 * time.Second
 )
 
 func main() {
-	// 1. Inicializa Logger
 	logger.Init()
+	if err := run(); err != nil {
+		slog.Error("Erro fatal", "error", err)
+		os.Exit(1)
+	}
+}
 
-	// 2. Carrega variaveis de ambiente
+func run() error {
 	if err := godotenv.Load(); err != nil {
 		slog.Warn("Arquivo .env não encontrado, usando vars do sistema.")
 	}
+	token := os.Getenv("TOKEN")
+	if token == "" {
+		return errors.New("TOKEN não definido")
+	}
 
-	// 2.5 Carrega áudio para memória
-	if err := voice.LoadAudio("./tuca-donka.mp3"); err != nil {
-		slog.Error("Erro fatal ao carregar áudio", "error", err)
-		os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	track, err := audio.DecodeFile(ctx, audioPath)
+	if err != nil {
+		return fmt.Errorf("carregar áudio: %w", err)
 	}
 	slog.Info("Áudio carregado na memória com sucesso!")
 
-	token := os.Getenv("TOKEN")
-	if token == "" {
-		slog.Error("TOKEN não definido.")
-		os.Exit(1)
-	}
-
-	// 3. Cria sessão do Discord
-	s, err := discordgo.New("Bot " + token)
+	client, err := newClient(token, bot.New(track))
 	if err != nil {
-		slog.Error("Erro ao criar sessão", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("criar cliente: %w", err)
 	}
+	defer closeClient(client)
 
-	// 4. Define Intents (ATUALIZAÇÃO CRÍTICA DO DISCORD)
-	// GuildVoiceStates é necessário para saber quem está nos canais
-	s.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates | discordgo.IntentsGuildMessages
-
-	// 5. Injeta handlers
-	b := bot.NewBot()
-	s.AddHandler(b.InteractionHandler)
-	s.AddHandler(b.VoiceStateUpdateHandler)
-	s.AddHandler(b.VoiceServerUpdateHandler)
-
-	// 6. Abre conexão
-	if err := s.Open(); err != nil {
-		slog.Error("Erro ao abrir conexão via socket", "error", err)
-		os.Exit(1)
-	}
-	defer s.Close()
-
-	// 7. Registra Slash Commands
 	slog.Info("Registrando comandos...")
-	commands := bot.GetCommands()
-	for _, cmd := range commands {
-		if _, err := s.ApplicationCommandCreate(s.State.User.ID, "", cmd); err != nil {
-			slog.Error("Erro ao registrar comando", "command", cmd.Name, "error", err)
-			os.Exit(1)
-		}
+	if _, err := client.Rest.SetGlobalCommands(client.ApplicationID, bot.Commands()); err != nil {
+		return fmt.Errorf("registrar comandos: %w", err)
+	}
+	if err := client.OpenGateway(ctx); err != nil {
+		return fmt.Errorf("abrir gateway: %w", err)
 	}
 
-	slog.Info("Bot logado", "user", s.State.User.Username)
+	<-ctx.Done()
+	slog.Info("Desligando...")
+	return nil
+}
 
-	// 8. Graceful Shutdown
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
+func newClient(token string, hakari *bot.Bot) (*disgobot.Client, error) {
+	return disgo.New(token,
+		disgobot.WithLogger(slog.Default()),
+		disgobot.WithGatewayConfigOpts(gateway.WithIntents(gateway.IntentGuilds, gateway.IntentGuildVoiceStates)),
+		disgobot.WithCacheConfigOpts(cache.WithCaches(cache.FlagVoiceStates)),
+		// Handlers block on voice handshakes, which need further gateway events to arrive.
+		disgobot.WithEventManagerConfigOpts(disgobot.WithAsyncEventsEnabled()),
+		disgobot.WithEventListenerFunc(hakari.OnReady),
+		disgobot.WithEventListenerFunc(hakari.OnCommand),
+		disgobot.WithEventListenerFunc(hakari.OnVoiceLeave),
+		disgobot.WithEventListenerFunc(hakari.OnVoiceMove),
+		disgobot.WithVoiceManagerConfigOpts(voice.WithDaveSessionCreateFunc(session.CreateFunc())),
+	)
+}
 
-	slog.Info("Removendo comandos e desligando...")
-	// Opcional: Limpar comandos ao sair para não duplicar em dev
-	// for _, cmd := range cmds {
-	// 	s.ApplicationCommandDelete(s.State.User.ID, "", cmd.ID)
-	// }
+func closeClient(client *disgobot.Client) {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	client.Close(ctx)
 }
