@@ -1,0 +1,13 @@
+services:
+  hakari-bot:
+    build: .
+    image: hakari-bot
+    container_name: hakari-bot
+    restart: unless-stopped
+    env_file: .env
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
